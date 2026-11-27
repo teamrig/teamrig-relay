@@ -1,0 +1,48 @@
+name: codeql
+
+# Scans the workflows for security flaws (CodeQL's security-extended queries for GitHub Actions) on each pull request
+# that changes them, each push to main, and weekly, since a new query can find a flaw in code that has not changed.
+# TypeScript joins the languages with the relay's first code. Findings show in the repository's Security tab and on
+# the pull request. It is not one of the checks main requires: a finding is read and fixed by a person, not by a red
+# merge button.
+on:
+  push:
+    branches: [main]
+  # A pull request that changes only Markdown has nothing to scan, so it skips the scan. The filter is safe because
+  # this is not a required check (a skipped required check would hold the merge); a push to main stays unfiltered.
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push cancels a pull request's older scan; a scan of main always finishes, so no main commit goes unscanned.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: codeql (actions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # security-events: write uploads the findings; a job's permissions replace the workflow's, so contents: read is restated.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: actions
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:actions
