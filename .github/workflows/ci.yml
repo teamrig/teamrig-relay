@@ -1,0 +1,155 @@
+name: ci
+
+on:
+  # Runs on each pull request, each merge queue group and each push to main. A pull request from a fork runs with no
+  # secrets and the read-only token below.
+  push:
+    branches: [main]
+  pull_request:
+  # A queued pull request lands only once its group, its commits on the newest main with those queued ahead of it,
+  # passed the same required check. The gates read the group's range, base_sha..head_sha.
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The gates are teamrig's own tools, run from a teamrig commit pinned by its full SHA, so the relay keeps no copy that
+# could drift and a change here cannot edit the gate that checks it. They read the repository they run in (the
+# working directory) and need no npm packages. Each job checks the relay out into relay/ and teamrig into teamrig/;
+# to move the pin, change TEAMRIG_SHA to a newer teamrig main commit in its own pull request.
+env:
+  TEAMRIG_SHA: bc3e97bb4b2ef2b00e91289398936c251bbdd5b0
+
+# Every job stops after 20 minutes (timeout-minutes), well past the slowest run, so a hung step fails its job instead
+# of holding the required check pending for GitHub's 6-hour default.
+jobs:
+  gates:
+    name: scrub and DCO gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: relay
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: teamrig/teamrig
+          ref: ${{ env.TEAMRIG_SHA }}
+          path: teamrig
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+      - run: node ../teamrig/tools/scrub/cli.ts --tree
+      - run: node ../teamrig/tools/scrub/cli.ts --github
+      - run: node ../teamrig/tools/dco/cli.ts --github
+
+  dependency-review:
+    name: dependency review
+    # Fails a pull request that adds or changes a dependency (an npm package or a GitHub Action) with a known
+    # advisory of any severity, dev dependencies included. It reads GitHub's dependency graph, so it needs no
+    # checkout. A push to main, a merge queue group (its pull requests each passed it) or a run by hand has no pull
+    # request to compare, so the step skips there and the job passes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        if: ${{ github.event_name == 'pull_request' }}
+        with:
+          fail-on-severity: low
+          fail-on-scopes: runtime, development, unknown
+
+  size-rule:
+    name: commit size rule
+    # Fails a commit over 400 changed non-test lines or 15 non-test files whose message has no Large-commit: <reason>
+    # line (see CONTRIBUTING.md).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: relay
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: teamrig/teamrig
+          ref: ${{ env.TEAMRIG_SHA }}
+          path: teamrig
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+      - run: node ../teamrig/tools/ci/size-rule-cli.ts --github
+
+  commit-subjects:
+    name: commit subject gate
+    # Fails a commit whose subject is not <type>(<area>): <what>, a Conventional Commit: a release raises the version
+    # from main's subjects, and a pull request is rebase-merged with its commits as they are (see CONTRIBUTING.md).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: relay
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: teamrig/teamrig
+          ref: ${{ env.TEAMRIG_SHA }}
+          path: teamrig
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+      - run: node ../teamrig/tools/ci/commit-subjects-cli.ts --github
+
+  summary:
+    name: every check passed
+    # The one check main's ruleset requires, so a new job here (added to needs) needs no ruleset change. It fails when
+    # any job it needs failed, was cancelled or skipped; always() runs it after a failed one, where a job would skip,
+    # which a required check reads as a pass.
+    if: ${{ always() }}
+    needs: [gates, dependency-review, size-rule, commit-subjects]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # actions: read lists this run's jobs; a job's permissions replace the workflow's, so contents: read is restated.
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: fail unless every job it needs passed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: exit 1
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: teamrig/teamrig
+          ref: ${{ env.TEAMRIG_SHA }}
+          path: teamrig
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+      # needs.*.result folds a job into one result; the jobs API lists each one, so every one must have passed.
+      - name: fail unless every job of the run passed
+        run: node teamrig/tools/ci/every-check-cli.ts "every check passed"
+        env:
+          GH_TOKEN: ${{ github.token }}
